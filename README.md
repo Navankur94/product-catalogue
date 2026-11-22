@@ -1,3 +1,4 @@
+
 # Northstar — Product Catalogue PoC
 
 A small, extensible product catalogue built for the AI-Native Engineer take-home challenge. The client is **React + TypeScript** and the backend is **PHP 8.3 + Laravel 12**. Product data flows through Laravel; the browser never calls Fake Store API.
@@ -145,3 +146,6 @@ See the Git commands in `docs/GIT_WORKFLOW.md`. Build on a feature branch and le
 ## Known limitations
 
 This is an intentionally time-boxed PoC. It does not include authentication, admin product editing, pagination, enquiry persistence, rate limiting, or a production SMTP integration. The product source is a third-party demo API and its metadata/rating quality is not guaranteed. See `DECISIONS.md` for the rationale and next steps.
+
+# product-catalogue
+
