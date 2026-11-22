@@ -1,3 +1,13 @@
-import { StrictMode } from 'react';import { createRoot } from 'react-dom/client';import{BrowserRouter,Routes,Route}from'react-router-dom';import{Header}from'./components/Header';import{Home}from'./pages/Home';import{Category}from'./pages/Category';import{Search}from'./pages/Search';import{ProductPage}from'./pages/Product';import'./styles.css';
-function App(){return <BrowserRouter><Header/><Routes><Route path="/" element={<Home/>}/><Route path="/categories/:category" element={<Category/>}/><Route path="/search" element={<Search/>}/><Route path="/products/:id" element={<ProductPage/>}/><Route path="*" element={<main className="state">Page not found.</main>}/></Routes><footer className="footer"><span>NORTHSTAR<span className="brand-dot">.</span></span><span>Thoughtful things, thoughtfully found.</span><span>© 2026</span></footer></BrowserRouter>}
-createRoot(document.getElementById('root')!).render(<StrictMode><App/></StrictMode>);
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { App } from './App';
+import './styles.css';
+
+const root = document.getElementById('root');
+if (!root) throw new Error('Root element #root not found');
+
+createRoot(root).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);

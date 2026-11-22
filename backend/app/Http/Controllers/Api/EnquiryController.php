@@ -1,32 +1,44 @@
 <?php
+
+declare(strict_types=1);
+
 namespace App\Http\Controllers\Api;
+
+use App\Http\Requests\StoreEnquiryRequest;
 use App\Mail\ProductEnquiry;
 use App\Services\CatalogueService;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Mail;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Routing\Controller;
-class EnquiryController extends Controller
-{
-    public function __construct(private CatalogueService $catalogue) {}
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Validation\ValidationException;
+use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
 
-    public function store(Request $request)
+final class EnquiryController extends Controller
+{
+    public function store(StoreEnquiryRequest $request, CatalogueService $catalogue): JsonResponse
     {
-        $data = $request->validate([
-            'product_id' => ['required','integer','min:1'],
-            'name' => ['required','string','min:2','max:100'],
-            'email' => ['required','email:rfc','max:254'],
-            'phone' => ['nullable','string','max:30'],
-            'message' => ['nullable','string','max:2000'],
-        ]);
-        try {
-            $product = $this->catalogue->find((int) $data['product_id']);
-            if (!$product) return response()->json(['message' => 'Product not found.'], 404);
-            $data['product_title'] = (string) $product['title'];
-            Mail::to(config('mail.sales_inbox', env('SALES_INBOX', 'sales@example.test')))->send(new ProductEnquiry($data));
-            return response()->json(['message' => 'Thank you. Your enquiry has been submitted.'], 201);
-        } catch (\Throwable $e) {
-            report($e);
-            return response()->json(['message' => 'We could not submit your enquiry right now. Please try again.'], 503);
+        $data = $request->validated();
+
+        // Product details come from the provider, never from the client.
+        $product = $catalogue->find((int) $data['product_id']);
+        if ($product === null) {
+            throw ValidationException::withMessages(['product_id' => 'The selected product does not exist.']);
         }
+
+        try {
+            Mail::to((string) config('mail.sales_inbox'))->send(new ProductEnquiry(
+                product: $product,
+                customerName: $data['name'],
+                customerEmail: $data['email'],
+                customerPhone: $data['phone'] ?? null,
+                customerMessage: $data['message'] ?? null,
+            ));
+        } catch (TransportExceptionInterface $e) {
+            report($e);
+
+            return response()->json(['message' => 'We could not send your enquiry right now. Please try again later.'], 503);
+        }
+
+        return response()->json(['message' => 'Thank you for your enquiry. Our sales team will be in touch soon.'], 201);
     }
 }

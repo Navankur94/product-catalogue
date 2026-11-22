@@ -44,7 +44,7 @@ See DECISIONS.md.
 
 ## Verification
 - [ ] `docker compose up --build`
-- [ ] `docker compose exec backend php artisan test`
+- [ ] `docker compose exec backend php vendor/bin/phpunit`
 - [ ] `docker compose exec frontend npm run build`
 - [ ] Manually tested all acceptance criteria
 

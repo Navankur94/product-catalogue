@@ -1,54 +1,154 @@
 <?php
+
+declare(strict_types=1);
+
 namespace Tests\Feature;
+
+use App\Contracts\ProductProvider;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Mail;
-use App\Mail\ProductEnquiry;
+use Illuminate\Support\Sleep;
+use Tests\Support\FakeStoreFixtures;
+use Tests\Support\InMemoryProductProvider;
 use Tests\TestCase;
-class CatalogueApiTest extends TestCase
+
+/** End-to-end through Laravel's HTTP kernel, CatalogueService and the Fake Store adapter (upstream faked). */
+final class CatalogueApiTest extends TestCase
 {
-    protected function setUp(): void { parent::setUp(); Cache::flush(); config(['services.fake_store.base_url' => 'https://fakestoreapi.com']); }
-    private function fakeProducts(): array
+    private const PRODUCT_SHAPE = ['id', 'title', 'description', 'category', 'price', 'image', 'rating' => ['rate', 'count']];
+
+    protected function setUp(): void
     {
-        return [
-          ['id'=>1,'title'=>'Alpha phone','description'=>'Smart phone','category'=>'electronics','price'=>10,'image'=>'https://example.test/a.png','rating'=>['rate'=>4.9,'count'=>10]],
-          ['id'=>2,'title'=>'Beta shoe','description'=>'Running shoe','category'=>"men's clothing",'price'=>20,'image'=>'https://example.test/b.png','rating'=>['rate'=>4.2,'count'=>8]],
-          ['id'=>3,'title'=>'Gamma phone case','description'=>'Protective case','category'=>'electronics','price'=>5,'image'=>'https://example.test/c.png','rating'=>['rate'=>3.8,'count'=>5]],
-        ];
+        parent::setUp();
+        Http::preventStrayRequests();
+        Sleep::fake();
     }
-    public function test_health_endpoint_is_available(): void { $this->getJson('/api/health')->assertOk()->assertJson(['status'=>'ok']); }
-    public function test_search_filters_products_on_backend(): void
+
+    private function upstreamReturnsFixtures(): void
     {
-        Http::fake(['https://fakestoreapi.com/products' => Http::response($this->fakeProducts())]);
-        $this->getJson('/api/products?q=phone')->assertOk()->assertJsonCount(2, 'data');
+        Http::fake([FakeStoreFixtures::URL => Http::response(FakeStoreFixtures::products())]);
     }
-    public function test_category_returns_featured_and_all_category_products(): void
+
+    public function test_health(): void
     {
-        Http::fake(['https://fakestoreapi.com/products' => Http::response($this->fakeProducts())]);
-        $this->getJson('/api/categories/electronics/products')->assertOk()->assertJsonCount(2, 'products')->assertJsonCount(2, 'featured');
+        $this->getJson('/api/health')->assertOk()->assertExactJson(['status' => 'ok']);
     }
-    public function test_enquiry_validates_and_sends_sales_email(): void
+
+    public function test_featured_returns_five_highest_rated_products(): void
     {
-        Mail::fake();
-        Http::fake(['https://fakestoreapi.com/products' => Http::response($this->fakeProducts())]);
-        $this->postJson('/api/enquiries', ['product_id'=>1,'product_title'=>'Client supplied spoof','name'=>'Alex Customer','email'=>'alex@example.com','phone'=>'1234567890','message'=>'Please contact me'])->assertCreated()->assertJsonStructure(['message']);
-        Mail::assertSent(ProductEnquiry::class, fn ($mail) => $mail->hasTo('sales@example.test') && $mail->enquiry['product_title'] === 'Alpha phone');
+        $this->upstreamReturnsFixtures();
+
+        $response = $this->getJson('/api/products/featured')
+            ->assertOk()
+            ->assertJsonCount(5, 'data')
+            ->assertJsonStructure(['data' => ['*' => self::PRODUCT_SHAPE]]);
+
+        // 4.8 (id 5), 4.8 (id 7), 4.7, 4.6, 4.1 — tie broken by lower id.
+        $this->assertSame([5, 7, 3, 4, 2], $response->json('data.*.id'));
     }
-    public function test_enquiry_rejects_invalid_email(): void
+
+    public function test_list_without_query_returns_all_products(): void
     {
-        $this->postJson('/api/enquiries', ['product_id'=>1,'name'=>'Alex Customer','email'=>'not-an-email'])->assertUnprocessable()->assertJsonValidationErrors(['email']);
+        $this->upstreamReturnsFixtures();
+
+        $this->getJson('/api/products')->assertOk()->assertJsonCount(7, 'data');
     }
-    public function test_featured_endpoint_returns_five_highest_rated_products(): void
+
+    public function test_search_matches_title_description_and_category_case_insensitively(): void
     {
-        $products = $this->fakeProducts();
-        for ($id = 4; $id <= 7; $id++) $products[] = ['id'=>$id,'title'=>'Item '.$id,'description'=>'Test','category'=>'electronics','price'=>1,'image'=>'https://example.test/x.png','rating'=>['rate'=>4 + ($id / 10),'count'=>1]];
-        Http::fake(['https://fakestoreapi.com/products' => Http::response($products)]);
-        $response = $this->getJson('/api/products/featured')->assertOk()->assertJsonCount(5, 'data');
-        $this->assertSame(7, $response->json('data.0.id'));
+        $this->upstreamReturnsFixtures();
+
+        $this->assertSame([1, 5], $this->getJson('/api/products?q=Phone')->assertOk()->json('data.*.id'));
+        $this->assertSame([4], $this->getJson('/api/products?q=dragon')->json('data.*.id'));
+        $this->assertSame([2, 3, 7], $this->getJson('/api/products?q=CLOTHING')->json('data.*.id'));
     }
-    public function test_unknown_product_returns_404(): void
+
+    public function test_search_without_matches_returns_empty_list(): void
     {
-        Http::fake(['https://fakestoreapi.com/products' => Http::response($this->fakeProducts())]);
-        $this->getJson('/api/products/999')->assertNotFound();
+        $this->upstreamReturnsFixtures();
+
+        $this->getJson('/api/products?q=zzz-no-match')->assertOk()->assertExactJson(['data' => []]);
+    }
+
+    public function test_search_rejects_invalid_query(): void
+    {
+        $this->getJson('/api/products?q='.str_repeat('a', 121))->assertUnprocessable()->assertJsonValidationErrors('q');
+        $this->getJson('/api/products?q[]=x')->assertUnprocessable()->assertJsonValidationErrors('q');
+    }
+
+    public function test_categories_are_unique_and_sorted(): void
+    {
+        $this->upstreamReturnsFixtures();
+
+        $this->getJson('/api/categories')->assertOk()
+            ->assertExactJson(['data' => ['electronics', 'jewelery', "men's clothing", "women's clothing"]]);
+    }
+
+    public function test_category_returns_ranked_featured_and_others(): void
+    {
+        $this->app->instance(ProductProvider::class, new InMemoryProductProvider(array_map(
+            fn (int $id) => InMemoryProductProvider::product($id, $id === 8 ? 'jewelery' : 'electronics', $id / 2),
+            range(1, 8),
+        )));
+
+        $response = $this->getJson('/api/categories/electronics/products')
+            ->assertOk()
+            ->assertJsonPath('data.category', 'electronics')
+            ->assertJsonStructure(['data' => ['category', 'featured' => ['*' => self::PRODUCT_SHAPE], 'others' => ['*' => self::PRODUCT_SHAPE]]]);
+
+        $this->assertSame([7, 6, 5, 4, 3], $response->json('data.featured.*.id'));
+        $this->assertSame([2, 1], $response->json('data.others.*.id'));
+    }
+
+    public function test_category_with_encoded_name_is_resolved(): void
+    {
+        $this->upstreamReturnsFixtures();
+
+        $this->getJson('/api/categories/'.rawurlencode("men's clothing").'/products')
+            ->assertOk()
+            ->assertJsonPath('data.category', "men's clothing")
+            ->assertJsonCount(2, 'data.featured')
+            ->assertJsonCount(0, 'data.others');
+    }
+
+    public function test_unknown_category_returns_404(): void
+    {
+        $this->upstreamReturnsFixtures();
+
+        $this->getJson('/api/categories/garden/products')->assertNotFound()->assertExactJson(['message' => 'Category not found.']);
+    }
+
+    public function test_product_details(): void
+    {
+        $this->upstreamReturnsFixtures();
+
+        $this->getJson('/api/products/3')->assertOk()
+            ->assertJsonPath('data.id', 3)
+            ->assertJsonPath('data.title', 'Gamma jacket')
+            ->assertJsonStructure(['data' => self::PRODUCT_SHAPE]);
+    }
+
+    public function test_unknown_or_invalid_product_id_returns_404(): void
+    {
+        $this->upstreamReturnsFixtures();
+
+        $this->getJson('/api/products/999')->assertNotFound()->assertExactJson(['message' => 'Product not found.']);
+        $this->getJson('/api/products/0')->assertNotFound();
+        $this->getJson('/api/products/99999999999999999999999')->assertNotFound();
+        $this->getJson('/api/products/abc')->assertNotFound()->assertExactJson(['message' => 'Not found.']);
+    }
+
+    public function test_upstream_failure_returns_503_on_every_catalogue_endpoint(): void
+    {
+        Http::fake([FakeStoreFixtures::URL => Http::response('down', 500)]);
+
+        foreach (['/api/products', '/api/products/featured', '/api/products/1', '/api/categories', '/api/categories/electronics/products'] as $uri) {
+            $this->getJson($uri)->assertStatus(503)
+                ->assertExactJson(['message' => 'The product catalogue is temporarily unavailable.']);
+        }
+    }
+
+    public function test_api_errors_are_json_without_accept_header(): void
+    {
+        $this->get('/api/does-not-exist')->assertNotFound()->assertExactJson(['message' => 'Not found.']);
     }
 }

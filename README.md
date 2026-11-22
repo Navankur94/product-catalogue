@@ -11,7 +11,7 @@ A small, extensible product catalogue built for the AI-Native Engineer take-home
 - Product detail page.
 - Enquiry form with server-side validation and a sales email using Laravel Mail.
 - Provider interface and Fake Store adapter, isolated from catalogue business logic.
-- Six Laravel feature tests covering health, search, category results, featured ranking, product 404, and enquiry validation/email.
+- 43 PHPUnit tests (unit + feature) covering ranking, category composition, search, product details, provider mapping/caching/failure, enquiry validation, email content, mail failure and rate limiting.
 - Docker Compose for local setup.
 
 ## Architecture
@@ -71,7 +71,7 @@ To send real email, configure a reachable SMTP service in `backend/.env` and set
 
 ```bash
 # Backend tests
-docker compose exec backend php artisan test
+docker compose exec backend php vendor/bin/phpunit
 
 # Frontend production build
 docker compose exec frontend npm run build
@@ -92,19 +92,27 @@ docker compose up --build
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/api/health` | Liveness check |
-| GET | `/api/products` | All products; optional `?q=` and `?category=` filters |
-| GET | `/api/products/featured` | Five highest-rated products; optional `?category=` |
-| GET | `/api/categories` | Unique categories |
-| GET | `/api/categories/{category}/products` | `featured` and all `products` for a category |
-| GET | `/api/products/{id}` | Product details |
-| POST | `/api/enquiries` | Validate and send a product enquiry |
+| GET | `/api/products?q=` | `{data: Product[]}`; optional case-insensitive search over title, description, category (`q` ≤ 120 chars) |
+| GET | `/api/products/featured` | `{data: Product[]}` — five highest-rated products (ties: lowest id) |
+| GET | `/api/products/{id}` | `{data: Product}`; `404` if unknown |
+| GET | `/api/categories` | `{data: string[]}` — unique, sorted |
+| GET | `/api/categories/{category}/products` | `{data: {category, featured: Product[], others: Product[]}}` — top five by rating, then the rest; `404` if unknown |
+| POST | `/api/enquiries` | Validate and email a product enquiry to `SALES_INBOX`; rate-limited per IP |
 
-Example enquiry body:
+`Product` is a provider-independent shape:
+
+```json
+{ "id": 1, "title": "…", "description": "…", "category": "…", "price": 109.95,
+  "image": "https://…", "rating": { "rate": 3.9, "count": 120 } }
+```
+
+`rating` may be `null`. Errors are always `{"message": "…"}`; validation errors add `"errors": {field: [messages]}`.
+
+Example enquiry body (`phone` and `message` optional; the product title is looked up server-side):
 
 ```json
 {
   "product_id": 1,
-  "product_title": "Example product",
   "name": "Alex Customer",
   "email": "alex@example.com",
   "phone": "+1 555 0100",
@@ -112,7 +120,13 @@ Example enquiry body:
 }
 ```
 
-The enquiry endpoint returns HTTP `201` and a thank-you message on success, `422` for invalid input, and `503` if email delivery fails. Product endpoints return JSON and use `503` for upstream provider failures.
+| Status | When |
+|---|---|
+| 200 / 201 | Success (`201` + thank-you message for enquiries) |
+| 404 | Unknown product, category or route |
+| 422 | Invalid input, including an unknown `product_id` on enquiries |
+| 429 | More than `ENQUIRY_RATE_LIMIT` enquiries per minute from one IP |
+| 503 | Product provider unavailable, or email transport failure |
 
 ## Configuration
 
@@ -121,7 +135,7 @@ Backend settings are documented in `backend/.env.example`; frontend API base URL
 ## Tests and quality checks
 
 ```bash
-docker compose exec backend php artisan test
+docker compose exec backend php vendor/bin/phpunit
 docker compose exec frontend npm run build
 ```
 
